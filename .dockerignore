@@ -1,0 +1,36 @@
+
+.git/
+.gitignore
+
+
+data/
+datasets/
+output/
+results/
+logs/
+wandb/
+runs/
+tmp/
+Tanks/
+checkpoints/
+weights/
+pretrained/
+experiments/
+
+# 大文件类型
+*.pt
+*.pth
+*.ckpt
+*.npz
+*.npy
+*.mp4
+*.avi
+*.mov
+*.jpg
+*.jpeg
+*.png
+*.webp
+
+# Python cache
+__pycache__/
+*.pyc

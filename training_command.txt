@@ -1,0 +1,317 @@
+CUDA_VISIBLE_DEVICES="6,7" torchrun --nproc_per_node=2 train.py   --train_dataset "ScanNetpp(split='train', ROOT='/workspace/data/scannetpp_processed_cut3r', resolution=224, aug_crop=16)"   --test_dataset "[None]"   --model "AsymmetricMASt3R(
+      pos_embed='RoPE100',
+      patch_embed_cls='ManyAR_PatchEmbed',
+      img_size=(224, 224),
+      head_type='dpt_uq',
+      output_mode='pts3d',
+      depth_mode=('exp', -inf, inf),
+      conf_mode=('exp', 1, inf),
+      enc_embed_dim=1024,
+      enc_depth=24,
+      enc_num_heads=16,
+      dec_embed_dim=768,
+      dec_depth=12,
+      dec_num_heads=12
+  )"   --pretrained 'checkpoints/DUSt3R_ViTLarge_BaseDecoder_512_dpt.pth'   --train_criterion "ConfLoss(Regr3D(L21, norm_mode='avg_dis'), alpha=0.2)"   --test_criterion  "ConfLoss(Regr3D(L21, norm_mode='avg_dis'), alpha=0.2)"   --batch_size 8 --epochs 1 --save_steps 5000 --warmup_epochs 0 --blr 1e-4   --lambda_evi 1e-3 --lambda_uq 1.0   --output_dir "./output/mast3r_scannetpp_uq_geom_headonly"
+
+
+
+  CUDA_VISIBLE_DEVICES="0,1" torchrun --nproc_per_node=2 train.py \
+  --train_dataset "ScanNetpp(split='train', ROOT='/workspace/data/scannetpp_processed_cut3r', resolution=224, aug_crop=16)" \
+  --test_dataset "[None]" \
+  --model "AsymmetricMASt3R(
+      pos_embed='RoPE100',
+      patch_embed_cls='ManyAR_PatchEmbed',
+      img_size=(224,224),
+      head_type='dpt_uq_feat',
+      output_mode='pts3d',
+      depth_mode=('exp', -inf, inf),
+      conf_mode=('exp', 1, inf),
+      enc_embed_dim=1024,
+      enc_depth=24,
+      enc_num_heads=16,
+      dec_embed_dim=768,
+      dec_depth=12,
+      dec_num_heads=12
+  )" \
+  --pretrained 'checkpoints/DUSt3R_ViTLarge_BaseDecoder_512_dpt.pth' \
+  --train_criterion "ConfLoss(Regr3D(L21, norm_mode='avg_dis'), alpha=0.2)" \
+  --test_criterion  "ConfLoss(Regr3D(L21, norm_mode='avg_dis'), alpha=0.2)" \
+  --batch_size 8 --epochs 1 --save_steps 100000 --warmup_epochs 0 --blr 1e-4 \
+  --lambda_evi 1e-3 --lambda_uq 1.0 \
+  --output_dir "./output/mast3r_scannetpp_uq_feat"
+
+
+
+
+
+####new training for 3d uq and joint traning method
+torchrun --nproc_per_node=6 train.py \
+  --train_dataset "ScanNetpp(split='train', ROOT='/workspace/data/scannetpp_processed_cut3r', resolution=224, aug_crop=16)" \
+  --test_dataset "[None]" \
+  --model "AsymmetricMASt3R(
+              pos_embed='RoPE100',
+              patch_embed_cls='ManyAR_PatchEmbed',
+              img_size=(224, 224),
+              head_type='catconv',
+              output_mode='pts3d+desc24',
+              depth_mode=('exp', -inf, inf),
+              conf_mode=('exp', 1, inf),
+              enc_embed_dim=1024,
+              enc_depth=24,
+              enc_num_heads=16,
+              dec_embed_dim=768,
+              dec_depth=12,
+              dec_num_heads=12,
+              two_confs=True,
+              desc_conf_mode=('exp', 0, inf)
+          )" \
+  --pretrained "checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth" \
+  --train_criterion "ConfLoss(Regr3D(L21, norm_mode='avg_dis'), alpha=0.2)" \
+  --test_criterion  "ConfLoss(Regr3D(L21, norm_mode='avg_dis'), alpha=0.2)" \
+  --batch_size 10 \
+  --epochs 5 \
+  --warmup_epochs 0 \
+  --save_steps 50000 \
+  --blr 3e-4 \
+  --lambda_uq 0.0 \
+  --lambda_evi_feat 0.0 \
+  --lambda_mean_gt 0.0 --lambda_mean_distill 0.0 --lambda_var_distill 0.0 \
+  --lambda_uq_xyz 0.2 \
+  --lambda_evi_xyz 1e-3 \
+  --output_dir "./output/mast3r_scannetpp_catconv_xyzUQ_joint"
+
+
+✅ Stage 1：冻结几何，只训练 3D UQ head
+
+特点：
+
+几何 + backbone 全部冻结，只解冻 head_xyz_evi；
+
+loss 完全用 loss_uq_xyz（因为 lambda_uq_xyz=1.0）；
+
+旧的 depth-UQ 和 distill loss 全部关掉。
+
+torchrun --nproc_per_node=6 train.py \
+  --train_dataset "ScanNetpp(split='train', ROOT='/workspace/data/scannetpp_processed_cut3r', resolution=224, aug_crop=16)" \
+  --test_dataset "[None]" \
+  --model "AsymmetricMASt3R(
+              pos_embed='RoPE100',
+              patch_embed_cls='ManyAR_PatchEmbed',
+              img_size=(224, 224),
+              head_type='catconv',
+              output_mode='pts3d+desc24',
+              depth_mode=('exp', -inf, inf),
+              conf_mode=('exp', 1, inf),
+              enc_embed_dim=1024,
+              enc_depth=24,
+              enc_num_heads=16,
+              dec_embed_dim=768,
+              dec_depth=12,
+              dec_num_heads=12,
+              two_confs=True,
+              desc_conf_mode=('exp', 0, inf)
+          )" \
+  --pretrained "checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth" \
+  --train_criterion "ConfLoss(Regr3D(L21, norm_mode='avg_dis'), alpha=0.2)" \
+  --test_criterion  "ConfLoss(Regr3D(L21, norm_mode='avg_dis'), alpha=0.2)" \
+  --batch_size 10 \
+  --epochs 5 \
+  --warmup_epochs 0 \
+  --save_steps 50000 \
+  --blr 3e-4 \
+  --uq_mode "geom" \
+  --freeze_geom_for_uq \
+  --lambda_uq 0.0 \
+  --lambda_evi_feat 0.0 \
+  --lambda_mean_gt 0.0 \
+  --lambda_mean_distill 0.0 \
+  --lambda_var_distill 0.0 \
+  --lambda_uq_xyz 1.0 \
+  --lambda_evi_xyz 1e-3 \
+  --output_dir "./output/mast3r_scannetpp_catconv_xyzUQ_stage1_frozenGeom"
+
+
+解释你可以直接跟老师说：
+
+“Stage 1 我们把 MASt3R 的几何 backbone + pts3d head 全部冻结，
+只训练挂在 CatConv token 上的新 3D UQ head（head_xyz_evi）；
+loss 只用 loss_uq_xyz，相当于在一个固定几何误差场上拟合 3D NIG 不确定性。”
+
+✅ Stage 2：Joint finetune 几何 + 3D UQ
+
+特点：
+
+不传 --freeze_geom_for_uq → 不再 freeze，几何和 UQ 都参与更新；
+
+几何 base loss + UQ loss 混合：
+
+𝐿
+total
+=
+(
+1
+−
+𝜆
+uq_xyz
+)
+𝐿
+geo
++
+𝜆
+uq_xyz
+𝐿
+UQ-3D
+L
+total
+	​
+
+=(1−λ
+uq_xyz
+	​
+
+)L
+geo
+	​
+
++λ
+uq_xyz
+	​
+
+L
+UQ-3D
+	​
+
+
+用你原来的 lambda_uq_xyz=0.2，让几何还是主角，UQ 是辅助。
+
+torchrun --nproc_per_node=6 train.py \
+  --train_dataset "ScanNetpp(split='train', ROOT='/workspace/data/scannetpp_processed_cut3r', resolution=224, aug_crop=16)" \
+  --test_dataset "[None]" \
+  --model "AsymmetricMASt3R(
+              pos_embed='RoPE100',
+              patch_embed_cls='ManyAR_PatchEmbed',
+              img_size=(224, 224),
+              head_type='catconv',
+              output_mode='pts3d+desc24',
+              depth_mode=('exp', -inf, inf),
+              conf_mode=('exp', 1, inf),
+              enc_embed_dim=1024,
+              enc_depth=24,
+              enc_num_heads=16,
+              dec_embed_dim=768,
+              dec_depth=12,
+              dec_num_heads=12,
+              two_confs=True,
+              desc_conf_mode=('exp', 0, inf)
+          )" \
+  --pretrained "./output/mast3r_scannetpp_catconv_xyzUQ_stage1_frozenGeom/checkpoint-last.pth" \
+  --train_criterion "ConfLoss(Regr3D(L21, norm_mode='avg_dis'), alpha=0.2)" \
+  --test_criterion  "ConfLoss(Regr3D(L21, norm_mode='avg_dis'), alpha=0.2)" \
+  --batch_size 10 \
+  --epochs 5 \
+  --warmup_epochs 0 \
+  --save_steps 50000 \
+  --blr 3e-4 \
+  --uq_mode "geom" \
+  --lambda_uq 0.0 \
+  --lambda_evi_feat 0.0 \
+  --lambda_mean_gt 0.0 \
+  --lambda_mean_distill 0.0 \
+  --lambda_var_distill 0.0 \
+  --lambda_uq_xyz 0.2 \
+  --lambda_evi_xyz 1e-3 \
+  --output_dir "./output/mast3r_scannetpp_catconv_xyzUQ_stage2_joint"
+
+
+这里我让 Stage 2 的 --pretrained 直接接着 Stage 1 的最后 checkpoint，你也可以换成 checkpoint-step-XXXXXX.pth 某一步。
+
+
+
+Stage 1：冻结几何，只训 3D UQ 头
+
+torchrun --nproc_per_node=6 train.py \
+  --train_dataset "ScanNetpp(split='train', ROOT='/workspace/data/scannetpp_processed_cut3r', resolution=224, aug_crop=16)" \
+  --test_dataset "[None]" \
+  --model "AsymmetricMASt3R(
+              pos_embed='RoPE100',
+              patch_embed_cls='ManyAR_PatchEmbed',
+              img_size=(224, 224),
+              head_type='catconv',
+              output_mode='pts3d+desc24',
+              depth_mode=('exp', -inf, inf),
+              conf_mode=('exp', 1, inf),
+              enc_embed_dim=1024,
+              enc_depth=24,
+              enc_num_heads=16,
+              dec_embed_dim=768,
+              dec_depth=12,
+              dec_num_heads=12,
+              two_confs=True,
+              desc_conf_mode=('exp', 0, inf)
+          )" \
+  --pretrained "checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth" \
+  --train_criterion "ConfLoss(Regr3D(L21, norm_mode='avg_dis'), alpha=0.2)" \
+  --test_criterion  "ConfLoss(Regr3D(L21, norm_mode='avg_dis'), alpha=0.2)" \
+  --batch_size 10 \
+  --epochs 5 \
+  --warmup_epochs 0 \
+  --save_steps 50000 \
+  --blr 3e-4 \
+  --lambda_uq 0.0 \
+  --lambda_evi_feat 0.0 \
+  --lambda_mean_gt 0.0 --lambda_mean_distill 0.0 --lambda_var_distill 0.0 \
+  --lambda_uq_xyz 1.0 \
+  --lambda_evi_xyz 1e-3 \
+  --uq_mode "xyz" \
+  --freeze_geom_for_uq \
+  --output_dir "./output/mast3r_scannetpp_catconv_xyzUQ_stage1_frozenGeom"
+
+
+Stage 2：joint finetune（几何 + 3D UQ 一起训）
+
+torchrun --nproc_per_node=6 train.py \
+  --train_dataset "ScanNetpp(split='train', ROOT='/workspace/data/scannetpp_processed_cut3r', resolution=224, aug_crop=16)" \
+  --test_dataset "[None]" \
+  --model "AsymmetricMASt3R(...同上...)" \
+  --pretrained "./output/mast3r_scannetpp_catconv_xyzUQ_stage1_frozenGeom/checkpoint-last.pth" \
+  --train_criterion "ConfLoss(Regr3D(L21, norm_mode='avg_dis'), alpha=0.2)" \
+  --test_criterion  "ConfLoss(Regr3D(L21, norm_mode='avg_dis'), alpha=0.2)" \
+  --batch_size 10 \
+  --epochs 5 \
+  --warmup_epochs 0 \
+  --save_steps 50000 \
+  --blr 3e-4 \
+  --lambda_uq 0.0 \
+  --lambda_evi_feat 0.0 \
+  --lambda_mean_gt 0.0 --lambda_mean_distill 0.0 --lambda_var_distill 0.0 \
+  --lambda_uq_xyz 0.2 \
+  --lambda_evi_xyz 1e-3 \
+  --uq_mode "xyz" \
+  --output_dir "./output/mast3r_scannetpp_catconv_xyzUQ_stage2_joint"
+
+
+
+  #sanity check for the dataset to see if it's good to train the model
+CUDA_VISIBLE_DEVICES=7 python train.py   --train_dataset "ScanNetpp(split='train', ROOT='/workspace/data/scannetpp_processed_cut3r', resolution=224, aug_crop=16)"   --test_dataset  "[None]"   --model "AsymmetricMASt3R(                     
+              pos_embed='RoPE100',                                                            
+              patch_embed_cls='ManyAR_PatchEmbed',                                            
+              img_size=(224, 224),                                                            
+              head_type='catconv',                                                            
+              output_mode='pts3d+desc24',                                                     
+              depth_mode=('exp', -inf, inf),                                                  
+              conf_mode=('exp', 1, inf),                                                      
+              enc_embed_dim=1024,                                                             
+              enc_depth=24,                                                                   
+              enc_num_heads=16,                                                               
+              dec_embed_dim=768,                                                              
+              dec_depth=12,                                                                   
+              dec_num_heads=12,                                                               
+              two_confs=True,                                                                 
+              desc_conf_mode=('exp', 0, inf)                                                  
+          )"   --pretrained "checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth"
+   --train_criterion "ConfLoss(Regr3D(L21, norm_mode='avg_dis'), alpha=0.2)"   --test_criterio
+n  "ConfLoss(Regr3D(L21, norm_mode='avg_dis'), alpha=0.2)"   --batch_size 10   --epochs 5   --
+warmup_epochs 0   --save_steps 5000   --blr 3e-4   --lambda_uq 0.0   --lambda_evi_feat 0.0   -
+-lambda_mean_gt 0.0   --lambda_mean_distill 0.0   --lambda_var_distill 0.0   --lambda_uq_xyz 0
+.0   --lambda_evi_xyz 0.0   --output_dir "./output_new/mast3r_scannetpp_catconv_geom_sanity"

@@ -1,0 +1,307 @@
+
+Step 1：训练 GeoUQ Teacher（几何 UQ）
+
+目的：
+把 head_type='dpt_uq' 这套几何 UQ 训到 depth mean 清晰、var pattern 合理、NLL 不爆炸。这个 checkpoint 后面会给 FeatUQ 当老师用。
+
+典型命令（你已经差不多跑过）：
+
+# GeoUQ teacher
+torchrun --nproc_per_node=2 train.py \
+  --train_dataset "ScanNetpp(split='train', ROOT='/workspace/data/scannetpp_processed_cut3r', resolution=224, aug_crop=16)" \
+  --test_dataset "[None]" \
+  --model "AsymmetricMASt3R(patch_embed_cls='ManyAR_PatchEmbed', img_size=(224, 224), head_type='dpt_uq')" \
+  --pretrained "checkpoints/DUSt3R_ViTLarge_BaseDecoder_512_dpt.pth" \
+  --train_criterion "ConfLoss(Regr3D(L21, norm_mode='avg_dis'), alpha=0.2)" \
+  --test_criterion  "ConfLoss(Regr3D(L21, norm_mode='avg_dis'), alpha=0.2)" \
+  --batch_size 8 --epochs 20 --blr 1e-4 \
+  --uq_mode "geom" \
+  --lambda_uq 1.0 --lambda_evi 1e-3 \
+  --output_dir "./output/scannetpp_uq_geom_teacher"
+
+
+得到的东西：
+
+./output/scannetpp_uq_geom_teacher/checkpoint-best.pth（或 last.pth）：
+这里的 DPT + 几何头 + GeoUQ 头 = 老师参数。
+
+论文里：
+
+这个 run = “GeoUQ baseline”。
+
+Step 2：FeatUQ Phase 1 —— 先把 feature depth mean 学清楚
+
+目的：
+让 feature 的 deterministic depth 分支先学会一个“清晰的深度图”，不急着学 var。否则直接上 NIG，结果就会像你现在看到的那样一团糊。
+
+模型：
+
+使用 head_type='dpt_uq_feat'（你已经在 repo 里加过 Option B）；
+
+初始化的时候，用 Step 1 的 teacher checkpoint 做 pretrained：
+
+backbone + DPT + GeoUQ 部分加载进来（strict=False）；
+
+新增的 feature depth head / evidential head 随机初始化。
+
+训练策略：
+
+uq_mode="feat"，phase=1（我们在 training.py 里加过这个 flag）；
+
+冻结：
+
+encoder + decoder + GeoUQ 全部 requires_grad=False；
+
+只开 depth_mean_head 那几个参数的 grad；
+
+Loss：
+
+只用 L2(depth_mu_feat, depth_gt) + 可以少量 L2 对齐 teacher mean（可选）。
+
+命令示例：
+
+# FeatUQ Phase 1: depth mean only
+torchrun --nproc_per_node=2 train.py \
+  --train_dataset "ScanNetpp(split='train', ROOT='/workspace/data/scannetpp_processed_cut3r', resolution=224, aug_crop=16)" \
+  --test_dataset "[None]" \
+  --model "AsymmetricMASt3R(patch_embed_cls='ManyAR_PatchEmbed', img_size=(224, 224), head_type='dpt_uq_feat')" \
+  --pretrained "./output/scannetpp_uq_geom_teacher/checkpoint-best.pth" \
+  --train_criterion "ConfLoss(Regr3D(L21, norm_mode='avg_dis'), alpha=0.2)" \
+  --test_criterion  "ConfLoss(Regr3D(L21, norm_mode='avg_dis'), alpha=0.2)" \
+  --batch_size 8 --epochs 5 --blr 1e-4 \
+  --uq_mode "feat" --phase 1 \
+  --lambda_evi_feat 0.0 \
+  --lambda_mean_gt 1.0 --lambda_mean_distill 0.1 --lambda_var_distill 0.0 \
+  --output_dir "./output/scannetpp_uq_feat_phase1"
+
+
+这一步结束你要 check：
+
+用 viz_uq.py 之类的脚本，把：
+
+depth_mean_feat
+
+和 GeoUQ 的 depth_mu_geom
+的可视化画出来，比一下清晰度、结构；
+
+指标上：feat depth 的 RMSE 不能比 GeoUQ 差太多。
+
+Step 3：FeatUQ Phase 2 —— 真正的 “Ours”（evidential + 蒸馏）
+
+目的：
+在 Phase 1 的基础上，加 evidential NIG + 从 GeoUQ 老师蒸馏 mean/var pattern，这个阶段训练完的模型就是你论文里的 “Ours”。
+
+初始化：
+
+从 Phase 1 的 checkpoint 开始（因为 Phase1 已经把 depth_mean_feat 训得差不多了）。
+
+训练策略：
+
+仍然 uq_mode="feat"，phase=2（我们在 freeze 函数里区分）；
+
+冻结：
+
+backbone + GeoUQ 通道依然 frozen，只 forward，当 teacher；
+
+FeatUQ 的 depth mean + evidential 头两支都 requires_grad=True；
+
+Loss 组合（per our design）：
+
+𝐿
+evi-feat
+L
+evi-feat
+	​
+
+：NIG NLL + evidential reg（用 depth GT）
+
+𝐿
+mean-gt
+L
+mean-gt
+	​
+
+：保持 mean 对齐 GT
+
+𝐿
+mean-distill
+L
+mean-distill
+	​
+
+：mean 向 GeoUQ 老师靠拢一点
+
+𝐿
+var-distill
+L
+var-distill
+	​
+
+：var pattern 向 GeoUQ 靠拢（防止乱飘）
+
+命令示例：
+
+# FeatUQ Phase 2: evidential + distillation (OURS)
+torchrun --nproc_per_node=2 train.py \
+  --train_dataset "ScanNetpp(split='train', ROOT='/workspace/data/scannetpp_processed_cut3r', resolution=224, aug_crop=16)" \
+  --test_dataset "[None]" \
+  --model "AsymmetricMASt3R(patch_embed_cls='ManyAR_PatchEmbed', img_size=(224, 224), head_type='dpt_uq_feat')" \
+  --pretrained "./output/scannetpp_uq_feat_phase1/checkpoint-last.pth" \
+  --train_criterion "ConfLoss(Regr3D(L21, norm_mode='avg_dis'), alpha=0.2)" \
+  --test_criterion  "ConfLoss(Regr3D(L21, norm_mode='avg_dis'), alpha=0.2)" \
+  --batch_size 8 --epochs 20 --blr 1e-4 \
+  --uq_mode "feat" --phase 2 \
+  --lambda_evi_feat 0.1 \
+  --lambda_mean_gt 1.0 \
+  --lambda_mean_distill 1.0 \
+  --lambda_var_distill 0.1 \
+  --output_dir "./output/scannetpp_uq_feat_phase2_ours"
+
+
+训练完以后，这个 ...feat_phase2_ours checkpoint 就是：
+
+“Ours (FeatUQ, feature-level evidential UQ distilled from GeoUQ)”
+
+
+###############################################################
+
+
+
+
+
+torchrun --nproc_per_node=2 train.py \
+  --train_dataset "ScanNetpp(split='train', ROOT='/workspace/data/scannetpp_processed_cut3r', resolution=224, aug_crop=16)" \
+  --test_dataset "[None]" \
+  --model "AsymmetricMASt3R(
+      pos_embed='RoPE100',
+      patch_embed_cls='ManyAR_PatchEmbed',
+      img_size=(224, 224),
+      head_type='dpt_uq_feat',
+      output_mode='pts3d',
+      depth_mode=('exp', -inf, inf),
+      conf_mode=('exp', 1, inf),
+      enc_embed_dim=1024,
+      enc_depth=24,
+      enc_num_heads=16,
+      dec_embed_dim=768,
+      dec_depth=12,
+      dec_num_heads=12
+  )" \
+  --pretrained "./output/mast3r_scannetpp_uq_geom_headonly/checkpoint-step-850000.pth" \
+  --train_criterion "ConfLoss(Regr3D(L21, norm_mode='avg_dis'), alpha=0.2)" \
+  --test_criterion  "ConfLoss(Regr3D(L21, norm_mode='avg_dis'), alpha=0.2)" \
+  --batch_size 64 --epochs 1 --blr 1e-4 \
+  --uq_mode "feat" --phase 1 \
+  --lambda_evi_feat 0.0 \
+  --save_steps 20000 \
+  --lambda_mean_gt 1.0 --lambda_mean_distill 0.1 --lambda_var_distill 0.0 \
+  --output_dir "./output/mast3r_scannetpp_uq_feat_phase1"
+
+
+
+torchrun --nproc_per_node=2 train.py \
+  --train_dataset "ScanNetpp(split='train', ROOT='/workspace/data/scannetpp_processed_cut3r', resolution=224, aug_crop=16)" \
+  --test_dataset "[None]" \
+  --model "AsymmetricMASt3R(
+      pos_embed='RoPE100',
+      patch_embed_cls='ManyAR_PatchEmbed',
+      img_size=(224, 224),
+      head_type='dpt_uq_feat',
+      output_mode='pts3d',
+      depth_mode=('exp', -inf, inf),
+      conf_mode=('exp', 1, inf),
+      enc_embed_dim=1024,
+      enc_depth=24,
+      enc_num_heads=16,
+      dec_embed_dim=768,
+      dec_depth=12,
+      dec_num_heads=12
+  )" \
+  --pretrained "./output/mast3r_scannetpp_uq_feat_phase1/checkpoint-last.pth" \
+  --train_criterion "ConfLoss(Regr3D(L21, norm_mode='avg_dis'), alpha=0.2)" \
+  --test_criterion  "ConfLoss(Regr3D(L21, norm_mode='avg_dis'), alpha=0.2)" \
+  --batch_size 64 --epochs 1 --blr 1e-4 \
+  --uq_mode "feat" --phase 2 \
+  --lambda_evi_feat 0.1 \
+  --lambda_mean_gt 1.0 \
+  --save_steps 20000 \
+  --lambda_mean_distill 1.0 \
+  --lambda_var_distill 0.1 \
+  --output_dir "./output/mast3r_scannetpp_uq_feat_phase2"
+
+
+
+
+
+
+
+new command 
+
+torchrun --nproc_per_node=6 train.py \
+  --train_dataset "ScanNetpp(split='train', ROOT='/workspace/data/scannetpp_processed_cut3r', resolution=224, aug_crop=16)" \
+  --test_dataset "[None]" \
+  --model "AsymmetricMASt3R(pos_embed='RoPE100', patch_embed_cls='ManyAR_PatchEmbed', img_size=(224, 224), head_type='dpt_uq_feat', output_mode='pts3d', depth_mode=('exp', -inf, inf), conf_mode=('exp', 1, inf), enc_embed_dim=1024, enc_depth=24, enc_num_heads=16, dec_embed_dim=768, dec_depth=12, dec_num_heads=12)" \
+  --pretrained "./output/mast3r_scannetpp_uq_geom_headonly/checkpoint-step-850000.pth" \
+  --train_criterion "ConfLoss(Regr3D(L21, norm_mode='avg_dis'), alpha=0.2)" \
+  --test_criterion  "ConfLoss(Regr3D(L21, norm_mode='avg_dis'), alpha=0.2)" \
+  --batch_size 10 \
+  --epochs 5 \
+  --blr 3e-4 \
+  --warmup_epochs 1 \
+  --uq_mode "feat" --phase 1 \
+  --lambda_evi_feat 0.0 \
+  --lambda_mean_gt 1.0 --lambda_mean_distill 0.1 --lambda_var_distill 0.0 \
+  --save_steps 20000 \
+  --output_dir "./output/mast3r_scannetpp_uq_feat_phase1_fast"
+
+
+torchrun --nproc_per_node=6 --master_port=29600 train.py \
+  --train_dataset "ScanNetpp(split='train', ROOT='/workspace/data/scannetpp_processed_cut3r', resolution=224, aug_crop=16)" \
+  --test_dataset "[None]" \
+  --model "AsymmetricMASt3R(
+      pos_embed='RoPE100',
+      patch_embed_cls='ManyAR_PatchEmbed',
+      img_size=(224, 224),
+      head_type='dpt_uq_feat',
+      output_mode='pts3d',
+      depth_mode=('exp', -inf, inf),
+      conf_mode=('exp', 1, inf),
+      enc_embed_dim=1024,
+      enc_depth=24,
+      enc_num_heads=16,
+      dec_embed_dim=768,
+      dec_depth=12,
+      dec_num_heads=12
+  )" \
+  --pretrained "./output/mast3r_scannetpp_uq_feat_phase1_fast_temp1/checkpoint-last.pth" \
+  --train_criterion "ConfLoss(Regr3D(L21, norm_mode='avg_dis'), alpha=0.2)" \
+  --test_criterion  "ConfLoss(Regr3D(L21, norm_mode='avg_dis'), alpha=0.2)" \
+  --batch_size 10 --epochs 5 --blr 1e-4  --warmup_epochs 1 \
+  --uq_mode "feat" --phase 2 \
+  --lambda_evi_feat 0.1 \
+  --lambda_mean_gt 1.0 \
+  --save_steps 20000 \
+  --lambda_mean_distill 1.0 \
+  --lambda_var_distill 0.1 \
+  --output_dir "./output/mast3r_scannetpp_uq_feat_phase2_fast"
+
+#for new run with correct distillation from geom head， with bigger distillation weight, learn more from teacher
+  torchrun --nproc_per_node=6 train.py \
+  --train_dataset "ScanNetpp(split='train', ROOT='/workspace/data/scannetpp_processed_cut3r', resolution=224, aug_crop=16)" \
+  --test_dataset "[None]" \
+  --model "AsymmetricMASt3R(pos_embed='RoPE100', patch_embed_cls='ManyAR_PatchEmbed', img_size=(224, 224), head_type='dpt_uq_feat', output_mode='pts3d', depth_mode=('exp', -inf, inf), conf_mode=('exp', 1, inf), enc_embed_dim=1024, enc_depth=24, enc_num_heads=16, dec_embed_dim=768, dec_depth=12, dec_num_heads=12)" \
+  --pretrained "./output/mast3r_scannetpp_uq_feat_phase1_fast_temp1/checkpoint-last.pth" \
+  --train_criterion "ConfLoss(Regr3D(L21, norm_mode='avg_dis'), alpha=0.2)" \
+  --test_criterion  "ConfLoss(Regr3D(L21, norm_mode='avg_dis'), alpha=0.2)" \
+  --batch_size 10 \
+  --epochs 5 \
+  --blr 3e-4 \
+  --warmup_epochs 1 \
+  --uq_mode "feat" --phase 1 \
+  --lambda_evi_feat 0.0 \
+  --lambda_mean_gt 0.5 --lambda_mean_distill 1.0 --lambda_var_distill 0.0 \
+  --save_steps 20000 \
+  --output_dir "./output/mast3r_scannetpp_uq_feat_phase1_fast_temp"
+
+ #run it with more epoch, 5 epoch
+torchrun --nproc_per_node=6 train.py   --train_dataset "ScanNetpp(split='train', ROOT='/workspace/data/scannetpp_processed_cut3r', resolution=224, aug_crop=16)"   --test_dataset "[None]"   --model "AsymmetricMASt3R(pos_embed='RoPE100', patch_embed_cls='ManyAR_PatchEmbed', img_size=(224, 224), head_type='dpt_uq_feat', output_mode='pts3d', depth_mode=('exp', -inf, inf), conf_mode=('exp', 1, inf), enc_embed_dim=1024, enc_depth=24, enc_num_heads=16, dec_embed_dim=768, dec_depth=12, dec_num_heads=12)"   --pretrained "./output/mast3r_scannetpp_uq_geom_headonly/checkpoint-step-850000.pth"   --train_criterion "ConfLoss(Regr3D(L21, norm_mode='avg_dis'), alpha=0.2)"   --test_criterion  "ConfLoss(Regr3D(L21, norm_mode='avg_dis'), alpha=0.2)"   --batch_size 10   --epochs 5   --blr 3e-4   --warmup_epochs 1   --uq_mode "feat" --phase 1   --lambda_evi_feat 0.0   --lambda_mean_gt 0.5 --lambda_mean_distill 1.0 --lambda_var_distill 0.0   --save_steps 20000   --output_dir "./output/mast3r_scannetpp_uq_feat_phase1_fast_temp1"
